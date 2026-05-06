@@ -796,6 +796,16 @@ impl RemoteConnection {
                     match serde_json::from_str(&self.line_buffer) {
                         Ok(event) => return RemoteRead::Event(event),
                         Err(error) => {
+                            if should_skip_non_json_protocol_line(&self.line_buffer) {
+                                crate::logging::warn(&format!(
+                                    "RemoteConnection::next_event: skipping non-JSON protocol line after parse error={} line={:?} (session_id={:?}, client_instance_id={:?})",
+                                    error,
+                                    self.line_buffer,
+                                    self.session_id,
+                                    self.client_instance_id
+                                ));
+                                continue;
+                            }
                             crate::logging::warn(&format!(
                                 "RemoteConnection::next_event: protocol error={} line={:?} (session_id={:?}, client_instance_id={:?})",
                                 error, self.line_buffer, self.session_id, self.client_instance_id
@@ -903,6 +913,11 @@ impl RemoteConnection {
     }
 }
 
+fn should_skip_non_json_protocol_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    !trimmed.is_empty() && !matches!(trimmed.as_bytes().first(), Some(b'{') | Some(b'['))
+}
+
 impl RemoteEventState for RemoteConnection {
     fn handle_tool_start(&mut self, id: &str, name: &str) {
         Self::handle_tool_start(self, id, name);
@@ -994,7 +1009,9 @@ impl RemoteEventState for ReplayRemoteState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{ServerEvent, encode_event};
     use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
     async fn detached_auth_changed_notification_does_not_wait_for_writer_lock() {
@@ -1037,5 +1054,65 @@ mod tests {
             serde_json::from_str::<Request>(&line).expect("clear request should deserialize"),
             Request::Clear { id: 1 }
         ));
+    }
+
+    #[tokio::test]
+    async fn next_event_skips_leaked_non_json_lines_and_resynchronizes() {
+        let (client, mut server) = Stream::pair().expect("stream pair");
+        let (reader, writer) = client.into_split();
+        let mut remote = RemoteConnection {
+            reader: BufReader::new(reader),
+            writer: Arc::new(Mutex::new(writer)),
+            _dummy_peer: None,
+            session_id: Some("test-session".to_string()),
+            client_instance_id: Some("test-client".to_string()),
+            next_request_id: 1,
+            tool_diff: RemoteDiffTracker::default(),
+            line_buffer: String::new(),
+            has_loaded_history: false,
+            call_output_tokens_seen: 0,
+        };
+
+        server
+            .write_all(b"<span class=\"rule\"></span>leaked tool output\n")
+            .await
+            .expect("write leaked line");
+        server
+            .write_all(encode_event(&ServerEvent::Pong { id: 7 }).as_bytes())
+            .await
+            .expect("write event");
+
+        match remote.next_event().await {
+            RemoteRead::Event(ServerEvent::Pong { id }) => assert_eq!(id, 7),
+            other => panic!("expected pong after leaked line, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn next_event_treats_malformed_json_as_protocol_error() {
+        let (client, mut server) = Stream::pair().expect("stream pair");
+        let (reader, writer) = client.into_split();
+        let mut remote = RemoteConnection {
+            reader: BufReader::new(reader),
+            writer: Arc::new(Mutex::new(writer)),
+            _dummy_peer: None,
+            session_id: Some("test-session".to_string()),
+            client_instance_id: Some("test-client".to_string()),
+            next_request_id: 1,
+            tool_diff: RemoteDiffTracker::default(),
+            line_buffer: String::new(),
+            has_loaded_history: false,
+            call_output_tokens_seen: 0,
+        };
+
+        server
+            .write_all(b"{not valid json}\n")
+            .await
+            .expect("write malformed json");
+
+        match remote.next_event().await {
+            RemoteRead::Disconnected(RemoteDisconnectReason::Protocol(_)) => {}
+            other => panic!("expected protocol disconnect, got {other:?}"),
+        }
     }
 }

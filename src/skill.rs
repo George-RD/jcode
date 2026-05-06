@@ -33,6 +33,16 @@ pub struct SkillRegistry {
     skills: HashMap<String, Skill>,
 }
 
+/// Parsed slash-skill invocation from an input line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillInvocation<'a> {
+    pub name: &'a str,
+    /// Optional user request text following the slash skill, for example
+    /// `/swarm-improve fix flaky tests` activates `swarm-improve` and submits
+    /// `fix flaky tests` as the user turn under that active skill.
+    pub request: Option<&'a str>,
+}
+
 impl SkillRegistry {
     /// Process-wide shared mutable registry used by both `skill_manage` and
     /// direct slash invocation paths. Keeping a single registry prevents slash
@@ -406,14 +416,33 @@ impl SkillRegistry {
         Ok(count)
     }
 
-    /// Check if a message is a skill invocation (starts with /)
-    pub fn parse_invocation(input: &str) -> Option<&str> {
+    /// Check if a message is a skill invocation (starts with `/skill`).
+    ///
+    /// A trailing request is allowed and returned separately so `/skill do x`
+    /// does not get forwarded to the model as a raw slash command.
+    pub fn parse_invocation(input: &str) -> Option<SkillInvocation<'_>> {
         let trimmed = input.trim();
-        if trimmed.starts_with('/') && !trimmed.contains(' ') {
-            Some(&trimmed[1..])
-        } else {
-            None
+        let rest = trimmed.strip_prefix('/')?;
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let name = parts.next()?.trim();
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return None;
         }
+
+        let request = parts
+            .next()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        Some(SkillInvocation { name, request })
+    }
+
+    /// Back-compat helper for callers/tests that only care about the skill name.
+    pub fn parse_invocation_name(input: &str) -> Option<&str> {
+        Self::parse_invocation(input).map(|invocation| invocation.name)
     }
 }
 
@@ -526,6 +555,35 @@ mod tests {
         assert!(entry.content.contains("/firefox-browser"));
         assert!(entry.content.contains("# Skill: firefox-browser"));
         assert_eq!(entry.source.as_deref(), Some("skill_registry"));
+    }
+
+    #[test]
+    fn parse_invocation_accepts_bare_skill() {
+        let invocation = SkillRegistry::parse_invocation(" /swarm-improve ").expect("invocation");
+
+        assert_eq!(invocation.name, "swarm-improve");
+        assert_eq!(invocation.request, None);
+    }
+
+    #[test]
+    fn parse_invocation_splits_trailing_request() {
+        let invocation = SkillRegistry::parse_invocation(
+            " /swarm-improve   inspect the repo and fix flaky tests ",
+        )
+        .expect("invocation");
+
+        assert_eq!(invocation.name, "swarm-improve");
+        assert_eq!(
+            invocation.request,
+            Some("inspect the repo and fix flaky tests")
+        );
+    }
+
+    #[test]
+    fn parse_invocation_rejects_non_skill_slash_text() {
+        assert!(SkillRegistry::parse_invocation("not /swarm-improve").is_none());
+        assert!(SkillRegistry::parse_invocation("/").is_none());
+        assert!(SkillRegistry::parse_invocation("/../tmp do stuff").is_none());
     }
 
     #[test]

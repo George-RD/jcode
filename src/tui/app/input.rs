@@ -1835,7 +1835,8 @@ impl App {
         }
 
         let raw_input = std::mem::take(&mut self.input);
-        let input = self.expand_paste_placeholders(&raw_input);
+        let mut display_input = raw_input.clone();
+        let mut input = self.expand_paste_placeholders(&raw_input);
         self.pasted_contents.clear();
         self.cursor_pos = 0;
         self.clear_input_undo_history();
@@ -1908,7 +1909,9 @@ impl App {
         }
 
         // Check for skill invocation
-        if let Some(skill_name) = SkillRegistry::parse_invocation(&input) {
+        if let Some(invocation) = SkillRegistry::parse_invocation(&input) {
+            let skill_name = invocation.name;
+            let trailing_request = invocation.request.map(str::to_string);
             let mut skill = self.current_skills_snapshot().get(skill_name).cloned();
 
             // Remote/minimal TUI clients may start with an empty skill snapshot, and
@@ -1941,6 +1944,13 @@ impl App {
                     title: None,
                     tool_data: None,
                 });
+
+                if let Some(request) = trailing_request {
+                    input = request;
+                    display_input = input.clone();
+                } else {
+                    return;
+                }
             } else {
                 self.push_display_message(DisplayMessage {
                     role: "error".to_string(),
@@ -1950,14 +1960,14 @@ impl App {
                     title: None,
                     tool_data: None,
                 });
+                return;
             }
-            return;
         }
 
         // Add user message to display (show placeholder to user, not full paste)
         self.push_display_message(DisplayMessage {
             role: "user".to_string(),
-            content: raw_input, // Show placeholder to user (condensed view)
+            content: display_input, // Show placeholder to user (condensed view)
             tool_calls: vec![],
             duration_secs: None,
             title: None,

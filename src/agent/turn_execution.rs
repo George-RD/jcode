@@ -601,11 +601,17 @@ impl Agent {
             }
 
             // Check for skill invocation
-            if let Some(skill_name) = SkillRegistry::parse_invocation(input) {
+            if let Some(invocation) = SkillRegistry::parse_invocation(input) {
+                let skill_name = invocation.name;
                 if let Some(skill) = skills.get(skill_name) {
                     println!("Activating skill: {}", skill.name);
                     println!("{}\n", skill.description);
                     self.active_skill = Some(skill_name.to_string());
+                    if let Some(request) = invocation.request {
+                        if let Err(e) = self.run_once(request).await {
+                            eprintln!("\nError: {}\n", e);
+                        }
+                    }
                     continue;
                 } else {
                     println!("Unknown skill: /{}", skill_name);
