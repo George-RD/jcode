@@ -57,6 +57,15 @@ pub fn shell_command(args: &[String]) -> String {
     }
 }
 
+#[cfg(unix)]
+fn shell_command_in_cwd(args: &[String], cwd: &Path) -> String {
+    format!(
+        "cd {} && exec {}",
+        sh_escape(cwd.to_string_lossy().as_ref()),
+        shell_command(args)
+    )
+}
+
 fn push_unique_terminal(candidates: &mut Vec<String>, term: impl Into<String>) {
     let term = term.into();
     if term.trim().is_empty() {
@@ -268,7 +277,7 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
         }
         #[cfg(target_os = "macos")]
         "ghostty" => {
-            let shell = shell_command(&command_parts(command));
+            let shell = shell_command_in_cwd(&command_parts(command), cwd);
             cmd = Command::new("open");
             cmd.current_dir(cwd)
                 .stdin(Stdio::null())
@@ -308,7 +317,7 @@ fn build_spawn_command(term: &str, command: &TerminalCommand, cwd: &Path) -> Opt
         }
         #[cfg(target_os = "macos")]
         "iterm2" => {
-            let shell = shell_command(&command_parts(command));
+            let shell = shell_command_in_cwd(&command_parts(command), cwd);
             cmd = Command::new("osascript");
             cmd.args([
                 "-e",
@@ -380,5 +389,50 @@ mod tests {
         let shell = shell_command(&["jcode".to_string(), "it's ok".to_string()]);
         #[cfg(unix)]
         assert_eq!(shell, "'jcode' 'it'\"'\"'s ok'");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shell_command_in_cwd_cd_execs_command() {
+        let shell = shell_command_in_cwd(
+            &[
+                "/bin/jcode".to_string(),
+                "--resume".to_string(),
+                "abc".to_string(),
+            ],
+            Path::new("/tmp/work tree"),
+        );
+
+        assert_eq!(
+            shell,
+            "cd '/tmp/work tree' && exec '/bin/jcode' '--resume' 'abc'"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn ghostty_launch_command_embeds_requested_cwd_in_shell() {
+        let terminal_command = TerminalCommand::new(
+            "/bin/jcode",
+            vec![
+                "--fresh-spawn".to_string(),
+                "--resume".to_string(),
+                "abc".to_string(),
+            ],
+        )
+        .fresh_spawn();
+        let cmd = build_spawn_command("ghostty", &terminal_command, Path::new("/tmp/work tree"))
+            .expect("ghostty command should be buildable");
+        let args = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(cmd.get_program().to_string_lossy(), "open");
+        assert!(args.iter().any(|arg| {
+            arg.contains(
+                "cd '/tmp/work tree' && exec '/bin/jcode' '--fresh-spawn' '--resume' 'abc'",
+            )
+        }));
     }
 }
