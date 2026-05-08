@@ -17,6 +17,9 @@ pub fn get_repo_dir() -> Option<PathBuf> {
     if is_jcode_repo(&path) {
         return Some(path);
     }
+    if let Some(repo) = find_repo_in_ancestors(&path) {
+        return Some(repo);
+    }
 
     // Fallback: check relative to executable
     if let Ok(exe) = std::env::current_exe() {
